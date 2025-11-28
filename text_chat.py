@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet
 import base64
+import time
 
 # ==================== Encryption Helpers ====================
 def derive_key_from_password(password: str, salt: bytes = b"fixed_salt_for_demo") -> bytes:
@@ -54,15 +55,12 @@ def recvall(sock, n):
 
 # ==================== Chat Window ====================
 class ChatWindow(QtWidgets.QWidget):
-    DISCOVERY_PORT = 5051
-    TCP_PORT = 5050
-
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Secure PyText — Auto LAN Discovery")
-        self.setMinimumSize(700, 500)
+        self.setWindowTitle("Secure PyText — Auto LAN Discovery + Configurable Ports")
+        self.setMinimumSize(800, 500)
 
-        # networking state
+        # Networking
         self.server_socket = None
         self.conn = None
         self.conn_addr = None
@@ -70,8 +68,10 @@ class ChatWindow(QtWidgets.QWidget):
         self.fernet = None
         self.discovery_thread = None
         self.receive_thread = None
+        self.TCP_PORT = 5050
+        self.DISCOVERY_PORT = 5051
 
-        # sound
+        # Sounds
         self.sound_received = QtMultimedia.QSoundEffect()
         self.sound_received.setSource(QtCore.QUrl.fromLocalFile("receive.wav"))
         self.sound_sent = QtMultimedia.QSoundEffect()
@@ -84,6 +84,8 @@ class ChatWindow(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
 
         top_row = QtWidgets.QHBoxLayout()
+        self.tcp_port_input = QtWidgets.QLineEdit("5050")
+        self.udp_port_input = QtWidgets.QLineEdit("5051")
         self.password_input = QtWidgets.QLineEdit()
         self.password_input.setEchoMode(QtWidgets.QLineEdit.Password)
         self.password_input.setPlaceholderText("Password (optional)")
@@ -97,6 +99,10 @@ class ChatWindow(QtWidgets.QWidget):
         connect_btn = QtWidgets.QPushButton("Connect (Auto)")
         connect_btn.clicked.connect(self.auto_connect)
 
+        top_row.addWidget(QtWidgets.QLabel("TCP Port:"))
+        top_row.addWidget(self.tcp_port_input)
+        top_row.addWidget(QtWidgets.QLabel("Discovery Port:"))
+        top_row.addWidget(self.udp_port_input)
         top_row.addWidget(QtWidgets.QLabel("Password:"))
         top_row.addWidget(self.password_input)
         top_row.addWidget(start_btn)
@@ -129,7 +135,7 @@ class ChatWindow(QtWidgets.QWidget):
     def log(self, *parts):
         self.chat_display.append(" ".join(str(p) for p in parts))
 
-    # ==================== Password ====================
+    # ==================== Password / Encryption ====================
     def apply_password(self):
         pwd = self.password_input.text().strip()
         if pwd == "":
@@ -142,15 +148,22 @@ class ChatWindow(QtWidgets.QWidget):
 
     # ==================== Server ====================
     def start_server(self):
+        try:
+            self.TCP_PORT = int(self.tcp_port_input.text())
+            self.DISCOVERY_PORT = int(self.udp_port_input.text())
+        except:
+            QMessageBox.warning(self, "Invalid port", "Ports must be integers.")
+            return
+
+        self.apply_password()
         if self.server_socket:
             self.log("[System] Server already running.")
             return
-        self.apply_password()
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind(("", self.TCP_PORT))
         self.server_socket.listen(1)
-        self.log(f"[System] Server started on port {self.TCP_PORT}")
+        self.log(f"[System] Server started on TCP port {self.TCP_PORT}")
         self.status.setText(f"Status: Listening on {self.TCP_PORT}")
 
         threading.Thread(target=self._accept_loop, daemon=True).start()
@@ -196,6 +209,13 @@ class ChatWindow(QtWidgets.QWidget):
 
     # ==================== Auto Connect via Broadcast ====================
     def auto_connect(self):
+        try:
+            self.TCP_PORT = int(self.tcp_port_input.text())
+            self.DISCOVERY_PORT = int(self.udp_port_input.text())
+        except:
+            QMessageBox.warning(self, "Invalid port", "Ports must be integers.")
+            return
+
         self.apply_password()
         self.log("[System] Searching for server on LAN...")
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -217,7 +237,11 @@ class ChatWindow(QtWidgets.QWidget):
     def _discovery_listener(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", self.DISCOVERY_PORT))
+        try:
+            s.bind(("", self.DISCOVERY_PORT))
+        except:
+            self.log("[System] Discovery port already in use.")
+            return
         while self.server_socket:
             try:
                 data, addr = s.recvfrom(1024)
@@ -228,15 +252,19 @@ class ChatWindow(QtWidgets.QWidget):
 
     # ==================== TCP Connect ====================
     def connect_to_peer(self, ip):
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            self.client_socket.connect((ip, self.TCP_PORT))
-            self.status.setText(f"Connected to {ip}")
-            self.log(f"[System] Connected to {ip}")
-            threading.Thread(target=self._receive_loop, args=(self.client_socket,), daemon=True).start()
-        except Exception as e:
-            self.log("[System] Connection failed:", e)
-            self.client_socket = None
+        for attempt in range(5):
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                self.client_socket.connect((ip, self.TCP_PORT))
+                self.status.setText(f"Connected to {ip}")
+                self.log(f"[System] Connected to {ip}")
+                threading.Thread(target=self._receive_loop, args=(self.client_socket,), daemon=True).start()
+                return
+            except Exception as e:
+                self.log(f"[System] Connection attempt {attempt+1} failed: {e}")
+                time.sleep(0.5)
+        self.log("[System] Could not connect after multiple attempts.")
+        self.client_socket = None
 
     # ==================== Receive Loop ====================
     def _receive_loop(self, sock):
